@@ -19,6 +19,7 @@ import fs from 'fs/promises';
 import lbug from '@ladybugdb/core';
 import { isReadOnlyDbError, loadFTSExtension, loadVectorExtension } from './lbug-adapter.js';
 import { closeQueryResults } from './query-result-utils.js';
+import { markFault, markQueryStage, type QueryStage } from '../fault-class.js';
 import { warnIfQueryTextUnbounded } from './query-batch.js';
 import { queryMemoryGuard } from './query-memory-guard.js';
 import {
@@ -800,7 +801,21 @@ function ladybugUnavailableError(repoId: string, err: Error | undefined): Error 
  * bookkeeping on "did the pool actually roll over" (LocalBackend) use the
  * return value; callers that only need the pool ready can ignore it.
  */
-export const initLbug = async (
+export const initLbug = (
+  repoId: string,
+  dbPath: string,
+  artifactOptions?: VectorPoolOptions,
+): Promise<boolean> => initLbugUnmarked(repoId, dbPath, artifactOptions).catch(throwServerFault);
+
+/**
+ * Errors that leave the read pool are server faults for an MCP tool call. The
+ * same error object is rethrown; only a non-enumerable mark is added.
+ */
+function throwServerFault(err: unknown): never {
+  throw markFault(err, 'server');
+}
+
+const initLbugUnmarked = async (
   repoId: string,
   dbPath: string,
   artifactOptions?: VectorPoolOptions,
@@ -1188,7 +1203,11 @@ async function initLbugWithDbInner(
  * lives on SharedDB because extension scope is per Database, and also joins
  * concurrent first semantic requests onto one LOAD attempt.
  */
-export async function ensureVectorExtension(repoId: string): Promise<boolean> {
+export function ensureVectorExtension(repoId: string): Promise<boolean> {
+  return ensureVectorExtensionUnmarked(repoId).catch(throwServerFault);
+}
+
+async function ensureVectorExtensionUnmarked(repoId: string): Promise<boolean> {
   const entry = pool.get(repoId);
   if (!entry) {
     throw new Error(`LadybugDB not initialized for repo "${repoId}". Call initLbug first.`);
@@ -1412,7 +1431,13 @@ export const executeQuery = async (repoId: string, cypher: string): Promise<any[
  * Execute a parameterized query on a specific repo's connection pool.
  * Uses prepare/execute pattern to prevent Cypher injection.
  */
-export const executeParameterized = async (
+export const executeParameterized = (
+  repoId: string,
+  cypher: string,
+  params: Record<string, any>,
+): Promise<any[]> => executeParameterizedUnmarked(repoId, cypher, params).catch(throwServerFault);
+
+const executeParameterizedUnmarked = async (
   repoId: string,
   cypher: string,
   params: Record<string, any>,
@@ -1434,8 +1459,11 @@ export const executeParameterized = async (
   // ensureVectorExtension performs its own checkout, so holding one here could
   // make a saturated pool wait for a connection that every caller is holding.
   // A load rejection must not replace the query's own diagnostic.
+  // Without the VECTOR extension a vector query cannot run whatever its text, so
+  // its failure belongs to the engine, not to the caller's statement.
+  let vectorUnavailable = false;
   if (callsVectorIndex(cypher)) {
-    await ensureVectorExtension(repoId).catch(() => false);
+    vectorUnavailable = !(await ensureVectorExtension(repoId).catch(() => false));
 
     // The preflight suspends, so close/re-init may replace the pool entry.
     // Re-read it before checkout to avoid querying through a stale handle.
@@ -1457,9 +1485,15 @@ export const executeParameterized = async (
   const deadline = performance.now() + QUERY_TIMEOUT_MS;
   const checkDeadline = () => {
     if (performance.now() >= deadline) {
-      throw new Error(`Query timed out after ${QUERY_TIMEOUT_MS}ms`);
+      throw staged(new Error(`Query timed out after ${QUERY_TIMEOUT_MS}ms`), stage);
     }
   };
+  // Errors raised while preparing or running the statement carry their stage,
+  // so a tool running a caller-written query can tell them from pool failures,
+  // unless the VECTOR preflight failed: then nothing about the text is at fault.
+  let stage: QueryStage = 'prepare';
+  const staged = <T>(err: T, at: QueryStage): T =>
+    vectorUnavailable ? err : markQueryStage(err, at);
   const nativeQuery = (async () => {
     try {
       const stmt = await conn.prepare(cypher);
@@ -1468,6 +1502,7 @@ export const executeParameterized = async (
         const errMsg = await stmt.getErrorMessage();
         throw new Error(`Prepare failed: ${errMsg}`);
       }
+      stage = 'execute';
       queryResult = await conn.execute(stmt, params);
       checkDeadline();
       const result = Array.isArray(queryResult) ? queryResult[0] : queryResult;
@@ -1478,11 +1513,14 @@ export const executeParameterized = async (
       if (isReadOnlyDbError(err)) {
         // Preserve the native error as `cause` so the original frame/message is
         // not lost behind the friendly read-only message (#2068 follow-up).
-        throw new Error('Write operations are not allowed. The pool adapter is read-only.', {
-          cause: err,
-        });
+        throw staged(
+          new Error('Write operations are not allowed. The pool adapter is read-only.', {
+            cause: err,
+          }),
+          'execute',
+        );
       }
-      throw err;
+      throw staged(err, stage);
     } finally {
       // Close the native QueryResult cursor(s) before returning the connection —
       // getAll() drains rows but does not release the native cursor, so without
@@ -1498,7 +1536,11 @@ export const executeParameterized = async (
   })();
   // A JS timeout cannot cancel native work. Keep its guard, cursor and checked-out
   // connection until that work settles, including results delivered after timeout.
-  return withTimeout(nativeQuery, QUERY_TIMEOUT_MS, 'Query');
+  // The timeout fires while the statement is prepared or run, so it carries the
+  // stage the query had reached.
+  return withTimeout(nativeQuery, QUERY_TIMEOUT_MS, 'Query').catch((err) => {
+    throw staged(err, stage);
+  });
 };
 
 /**
