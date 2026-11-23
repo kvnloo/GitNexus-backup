@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { markFault } from '../fault-class.js';
 import type {
   ContractRole,
   GroupConfig,
@@ -137,8 +138,12 @@ export class GroupNotFoundError extends Error {
   constructor(public readonly groupName: string) {
     super(`Group "${groupName}" not found`);
     this.name = 'GroupNotFoundError';
+    markFault(this, 'client');
   }
 }
+
+/** The file-name length limit (NAME_MAX) of common filesystems. */
+const MAX_FILE_NAME_BYTES = 255;
 
 export async function loadGroupConfig(groupDir: string): Promise<GroupConfig> {
   const fsp = await import('node:fs/promises');
@@ -149,7 +154,21 @@ export async function loadGroupConfig(groupDir: string): Promise<GroupConfig> {
     content = await fsp.readFile(yamlPath, 'utf-8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      // Windows reports ENOENT, not ENOTDIR, when the group directory is a
+      // file: that is broken storage, not a group the caller can create.
+      const dir = await fsp.stat(groupDir).catch(() => undefined);
+      if (dir && !dir.isDirectory()) throw err;
       throw new GroupNotFoundError(path.basename(groupDir));
+    }
+    // The server builds this path; the caller supplies only the group name, which
+    // GROUP_NAME_RE restricts to safe characters but not in length. Only a name that
+    // is itself over the file-name limit is the caller's; an over-long root or any
+    // other error is a server fault.
+    if (
+      (err as NodeJS.ErrnoException).code === 'ENAMETOOLONG' &&
+      Buffer.byteLength(path.basename(groupDir)) > MAX_FILE_NAME_BYTES
+    ) {
+      throw markFault(err, 'client');
     }
     throw err;
   }
