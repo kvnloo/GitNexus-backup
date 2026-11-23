@@ -251,9 +251,36 @@ it('caps guard wait by the remaining acquisition budget after waiting on a workl
   expect(error).toBeInstanceOf(IndexLockTimeoutError);
   expect(error.guardPath).toBeUndefined();
   expect(error.holderKnown).toBe(true);
+  expect(error.liveHolder).toBe(true);
   expect(error.holder.token).toBe(first.record.token);
   expect(Date.now() - start).toBe(200);
   first.release();
+});
+
+it('does not count a foreign-host holder as live when the guard wait times out', async () => {
+  const foreign = {
+    v: 1,
+    pid: process.pid,
+    hostname: `${os.hostname()}-foreign`,
+    startTime: null,
+    token: 'foreign-holder',
+    invocationId: 'foreign-holder',
+    acquiredAt: '',
+  };
+  fs.writeFileSync(lockPath, JSON.stringify(foreign));
+  const pending = acquireIndexLock(dir, {
+    timeoutMs: 200,
+    pollMs: 10,
+    onWaitStart: () => fs.writeFileSync(guardPath, 'orphan'),
+  }).catch((e) => e);
+  await vi.runAllTimersAsync();
+  const error = await pending;
+  expect(error).toBeInstanceOf(IndexLockTimeoutError);
+  expect(error.guardPath).toBeUndefined();
+  expect(error.holderKnown).toBe(true);
+  expect(error.holder.token).toBe('foreign-holder');
+  // Its liveness is unknowable from here, so it proves nothing.
+  expect(error.liveHolder).toBe(false);
 });
 
 it('releases the guard before returning a workload handle', async () => {
