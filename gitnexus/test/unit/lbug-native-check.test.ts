@@ -309,13 +309,23 @@ describe('checkLbugNative', () => {
   // Under WSL, a non-interactive `wsl.exe bash -lc` inherits the Windows PATH, so a
   // Windows `npm i -g gitnexus` shim can win over the Linux install and Linux node
   // then loads the Windows lbugjs.node. The binary's PE header gives it away.
-  const PE_BYTES = Buffer.from('MZ\x90\x00not-really-a-dll', 'latin1');
+  // Minimal PE layout: `MZ`, e_lfanew (u32 LE at 0x3c) pointing at `PE\0\0`.
+  const peHeader = (signature: string): Buffer => {
+    const buf = Buffer.alloc(0x44);
+    buf.write('MZ', 0, 'latin1');
+    buf.writeUInt32LE(0x40, 0x3c);
+    buf.write(signature, 0x40, 'latin1');
+    return buf;
+  };
+  const PE_BYTES = peHeader('PE\0\0');
   const ELF_BYTES = Buffer.from('\x7fELF\x02\x01\x01', 'latin1');
   const windowsShadowCases: ReadonlyArray<
     readonly [string, NodeJS.Platform, Buffer | null, boolean]
   > = [
     ['a Windows (PE) binary on Linux', 'linux', PE_BYTES, true],
     ['a Linux (ELF) binary on Linux', 'linux', ELF_BYTES, false],
+    ['a truncated MZ file with no PE header on Linux', 'linux', Buffer.from('MZ\x90\x00'), false],
+    ['an MZ file whose e_lfanew misses the PE signature', 'linux', peHeader('XX\0\0'), false],
     ['a one-byte file on Linux', 'linux', Buffer.from('M'), false],
     ['an empty file on Linux', 'linux', Buffer.alloc(0), false],
     ['an unreadable (absent) binary on Linux', 'linux', null, false],

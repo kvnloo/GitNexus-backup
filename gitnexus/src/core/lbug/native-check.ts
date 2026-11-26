@@ -436,7 +436,7 @@ export function glibcTooOldMessage(stderr: string): string | null {
  * Under WSL, a non-interactive `wsl.exe bash -lc …` inherits the Windows PATH,
  * so a Windows `npm i -g gitnexus` shim (under `/mnt/c/…`) can win over the
  * Linux install and Linux node then loads the Windows prebuilt. Keyed on the
- * binary itself (a PE file starts with `MZ`, an ELF one with `\x7fELF`) rather
+ * binary itself (a PE file starts with `MZ` and carries a `PE\0\0` header) rather
  * than on the `/mnt/<drive>/` path, so a Linux build that merely lives on a
  * Windows drive, or a custom WSL automount root, is not misreported.
  */
@@ -445,18 +445,25 @@ export function windowsInstallShadowMessage(
   platform: NodeJS.Platform = process.platform,
 ): string | null {
   if (platform !== 'linux') return null;
-  const magic = Buffer.alloc(2);
+  // MZ alone is not enough: a truncated or corrupt file must keep the generic
+  // repair guidance, so also require `PE\0\0` at the e_lfanew offset (u32 LE at 0x3c).
+  const head = Buffer.alloc(4096);
+  let size: number;
   try {
     const fd = fs.openSync(binaryPath, 'r');
     try {
-      fs.readSync(fd, magic, 0, 2, 0);
+      size = fs.readSync(fd, head, 0, head.length, 0);
     } finally {
       fs.closeSync(fd);
     }
   } catch {
     return null;
   }
-  if (magic.toString('latin1') !== 'MZ') return null;
+  if (size < 0x40 || head.toString('latin1', 0, 2) !== 'MZ') return null;
+  const peOffset = head.readUInt32LE(0x3c);
+  if (peOffset + 4 > size || head.toString('latin1', peOffset, peOffset + 4) !== 'PE\0\0') {
+    return null;
+  }
   return [
     'This lbugjs.node is a Windows build, so Linux node cannot load it.',
     `  ${binaryPath}`,
