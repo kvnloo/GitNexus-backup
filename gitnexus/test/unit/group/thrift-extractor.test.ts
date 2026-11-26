@@ -231,6 +231,11 @@ service OrderService {
       expect(result).toBeNull();
     });
 
+    it('returns null for negating annotations (@NotThriftClient)', () => {
+      const result = serviceFromAnnotatedClient('OrderClient', 'NotThriftClient');
+      expect(result).toBeNull();
+    });
+
     it('returns null for non-Client type patterns', () => {
       const result = serviceFromAnnotatedClient('OrderService', 'OrderThriftClient');
       expect(result).toBeNull();
