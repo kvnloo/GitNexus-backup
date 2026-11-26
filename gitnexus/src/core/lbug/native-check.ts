@@ -296,6 +296,23 @@ export function checkLbugNative(overridePkgDir?: string): NativeCheckResult {
     };
   }
 
+  // Same for a Windows install reached from Linux under WSL: that install has no
+  // Linux prebuilt, so re-running its install.js cannot produce a loadable binary.
+  const shadowExplanation = windowsInstallShadowMessage(binaryPath);
+  if (shadowExplanation !== null) {
+    return {
+      ok: false,
+      binaryPath,
+      kind: 'load_failed',
+      message: [
+        'LadybugDB native binary (lbugjs.node) exists but failed to load:',
+        `  ${describeNativeLoadFailure(probe)}`,
+        '',
+        shadowExplanation,
+      ].join('\n'),
+    };
+  }
+
   return {
     ok: false,
     binaryPath,
@@ -410,6 +427,53 @@ export function glibcTooOldMessage(stderr: string): string | null {
     `  - Run GitNexus on a distribution with glibc ${required} or newer`,
     '    (Ubuntu 22.04+, RHEL/Rocky/Alma 9+, Debian 12+, Fedora 35+).',
     '  - Or use the GitNexus container image, which bundles a current glibc.',
+  ].join('\n');
+}
+
+/**
+ * Explain a load failure caused by a Windows build of lbugjs.node on Linux, or null.
+ *
+ * Under WSL, a non-interactive `wsl.exe bash -lc …` inherits the Windows PATH,
+ * so a Windows `npm i -g gitnexus` shim (under `/mnt/c/…`) can win over the
+ * Linux install and Linux node then loads the Windows prebuilt. Keyed on the
+ * binary itself (a PE file starts with `MZ`, an ELF one with `\x7fELF`) rather
+ * than on the `/mnt/<drive>/` path, so a Linux build that merely lives on a
+ * Windows drive, or a custom WSL automount root, is not misreported.
+ */
+export function windowsInstallShadowMessage(
+  binaryPath: string,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  if (platform !== 'linux') return null;
+  const magic = Buffer.alloc(2);
+  try {
+    const fd = fs.openSync(binaryPath, 'r');
+    try {
+      fs.readSync(fd, magic, 0, 2, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+  if (magic.toString('latin1') !== 'MZ') return null;
+  return [
+    'This lbugjs.node is a Windows build, so Linux node cannot load it.',
+    `  ${binaryPath}`,
+    '',
+    'Under WSL this usually means a Windows-installed gitnexus is shadowing the',
+    'Linux one on PATH: WSL appends the Windows PATH, so a non-interactive',
+    '`wsl.exe bash -lc …` launch can pick up the Windows npm shim.',
+    'Reinstalling that copy will NOT help — Windows npm installs Windows binaries.',
+    '',
+    'Options:',
+    '  - Install gitnexus inside WSL with the Linux npm (`which npm` must not be',
+    '    a Windows path):  npm install -g gitnexus',
+    '  - Put the Linux npm global bin directory first on PATH in the launch command.',
+    '  - If you no longer use it on Windows, remove the Windows copy',
+    '    (from Windows: npm uninstall -g gitnexus).',
+    '  - Or set `appendWindowsPath = false` under [interop] in /etc/wsl.conf',
+    '    (this hides every Windows command, such as code and explorer.exe, from WSL).',
   ].join('\n');
 }
 

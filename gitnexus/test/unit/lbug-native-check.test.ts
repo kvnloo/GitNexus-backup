@@ -6,6 +6,7 @@ import {
   checkLbugNative,
   glibcTooOldMessage,
   prepareLbugNativeBinary,
+  windowsInstallShadowMessage,
 } from '../../src/core/lbug/native-check.js';
 
 describe('checkLbugNative', () => {
@@ -303,6 +304,73 @@ describe('checkLbugNative', () => {
 
   it.each(nonGlibcCases)('returns null for %s, leaving the generic message', (_name, stderr) => {
     expect(glibcTooOldMessage(stderr)).toBeNull();
+  });
+
+  // Under WSL, a non-interactive `wsl.exe bash -lc` inherits the Windows PATH, so a
+  // Windows `npm i -g gitnexus` shim can win over the Linux install and Linux node
+  // then loads the Windows lbugjs.node. The binary's PE header gives it away.
+  const PE_BYTES = Buffer.from('MZ\x90\x00not-really-a-dll', 'latin1');
+  const ELF_BYTES = Buffer.from('\x7fELF\x02\x01\x01', 'latin1');
+  const windowsShadowCases: ReadonlyArray<
+    readonly [string, NodeJS.Platform, Buffer | null, boolean]
+  > = [
+    ['a Windows (PE) binary on Linux', 'linux', PE_BYTES, true],
+    ['a Linux (ELF) binary on Linux', 'linux', ELF_BYTES, false],
+    ['a one-byte file on Linux', 'linux', Buffer.from('M'), false],
+    ['an empty file on Linux', 'linux', Buffer.alloc(0), false],
+    ['an unreadable (absent) binary on Linux', 'linux', null, false],
+    ['a Windows binary on Windows itself', 'win32', PE_BYTES, false],
+    ['a Windows binary on macOS', 'darwin', PE_BYTES, false],
+  ];
+
+  it.each(windowsShadowCases)(
+    'Windows-install shadow hint for %s',
+    async (_name, platform, bytes, expectHint) => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lbug-shadow-'));
+      try {
+        const binaryPath = path.join(tmpDir, 'lbugjs.node');
+        if (bytes !== null) await fs.writeFile(binaryPath, bytes);
+
+        const message = windowsInstallShadowMessage(binaryPath, platform);
+
+        if (!expectHint) {
+          expect(message).toBeNull();
+          return;
+        }
+        expect(message).toContain('is a Windows build');
+        expect(message).toContain(binaryPath);
+        expect(message).toContain('will NOT help');
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('checkLbugNative explains a Windows lbugjs.node instead of prescribing a reinstall', async () => {
+    // Real probe, real Node: a PE file fails dlopen ("invalid ELF header" on Linux),
+    // which is exactly what the shadowed Windows install hits under WSL.
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lbug-check-shadow-'));
+    try {
+      await fs.writeFile(path.join(tmpDir, 'lbugjs.node'), PE_BYTES);
+      await fs.writeFile(path.join(tmpDir, 'install.js'), '');
+
+      const result = checkLbugNative(tmpDir);
+
+      expect(result.ok).toBe(false);
+      expect(result.kind).toBe('load_failed');
+      expect(result.message).toContain('failed to load');
+      if (process.platform === 'linux') {
+        expect(result.message).toContain('is a Windows build');
+        expect(result.message).not.toContain('install.js');
+        expect(result.message).not.toContain('To repair:');
+      } else {
+        // Elsewhere a PE file is not this failure class: keep the generic advice.
+        expect(result.message).not.toContain('is a Windows build');
+        expect(result.message).toContain('install.js');
+      }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('returns ok:true when the load probe cannot be spawned (inconclusive, not a broken binary)', async () => {
