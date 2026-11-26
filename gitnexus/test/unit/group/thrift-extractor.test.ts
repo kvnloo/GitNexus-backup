@@ -191,7 +191,7 @@ service OrderService {
   // Note: End-to-end Java consumer tests are in conformance tests.
   // These tests verify the service name extraction logic.
   describe('annotation-based thrift client service name extraction (#2629)', () => {
-    it('extracts service from ISimpleClient pattern with ThriftClient annotation', () => {
+    it('extracts service from ISimpleServiceClient pattern with ThriftClient annotation', () => {
       const result = serviceFromAnnotatedClient('ISimpleServiceClient', 'SimpleThriftClient');
       expect(result).toEqual({
         serviceName: 'SimpleService',
