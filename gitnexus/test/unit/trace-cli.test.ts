@@ -167,6 +167,79 @@ describe('CLI trace command', () => {
     expect(callTool).toHaveBeenCalledWith('trace', expect.objectContaining({ includeTests: true }));
   });
 
+  it('runs with only --from-uid/--to-uid and no positional names', async () => {
+    await traceCommand(undefined, undefined, {
+      fromUid: 'Function:route.ts:alpha',
+      toUid: 'Function:route.ts:gamma',
+    });
+
+    expect(callTool).toHaveBeenCalledWith(
+      'trace',
+      expect.objectContaining({
+        from_uid: 'Function:route.ts:alpha',
+        to_uid: 'Function:route.ts:gamma',
+      }),
+    );
+  });
+
+  it('exits with usage when to is missing and no to_uid', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit');
+    });
+    await expect(traceCommand('A', undefined, {})).rejects.toThrow('process.exit');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(callTool).not.toHaveBeenCalled();
+    exitSpy.mockRestore();
+  });
+
+  it('accepts UID-only endpoints through the real CLI dispatcher (#4124)', async () => {
+    const originalArgv = process.argv;
+    process.argv = [
+      'node',
+      'gitnexus',
+      'trace',
+      '--from-uid',
+      'Function:route.ts:alpha',
+      '--to-uid',
+      'Function:route.ts:gamma',
+    ];
+    try {
+      vi.resetModules();
+      await import('../../src/cli/index.js');
+      await vi.waitFor(() => {
+        expect(callTool).toHaveBeenCalledWith(
+          'trace',
+          expect.objectContaining({
+            from_uid: 'Function:route.ts:alpha',
+            to_uid: 'Function:route.ts:gamma',
+          }),
+        );
+      });
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it('exits with usage through the real CLI dispatcher when an endpoint is missing', async () => {
+    // Record-only exit mock: a throwing mock would surface as an unhandled
+    // rejection because program.parse does not await async actions. The action
+    // keeps running after the no-op exit, so callTool is out of scope here —
+    // the dispatcher-level assertion is that the handler requests exit(1).
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    const originalArgv = process.argv;
+    process.argv = ['node', 'gitnexus', 'trace', 'A'];
+    try {
+      vi.resetModules();
+      await import('../../src/cli/index.js');
+      await vi.waitFor(() => {
+        expect(exitSpy).toHaveBeenCalledWith(1);
+      });
+    } finally {
+      process.argv = originalArgv;
+      exitSpy.mockRestore();
+    }
+  });
+
   it('parses -f through the real CLI dispatcher', async () => {
     const originalArgv = process.argv;
     process.argv = ['node', 'gitnexus', 'trace', 'A', 'B', '-f', 'src/a.ts'];
